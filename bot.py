@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import csv
+import io
+import json
 import logging
 from datetime import date
 
-from telegram import Update
+from telegram import InputFile, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
 
 from config import settings
@@ -267,7 +270,127 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/delete - Permanently delete your profile\n"
         "/help - Show this menu"
     )
+    if update.effective_user.id in settings.ADMIN_IDS:
+        message += "\n\nAdmin commands:\n/admin_help - Show admin commands\n/admin_stats - Show bot statistics\n/admin_report - Show recent reports\n/admin_users - List users\n/admin_user USER_ID - Inspect a user\n/ban USER_ID [reason]\n/unban USER_ID"
     await update.message.reply_text(message)
+
+
+async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in settings.ADMIN_IDS:
+        await update.message.reply_text("You do not have admin access.")
+        return
+    await update.message.reply_text(
+        "/admin_help - Show admin commands\n"
+        "/admin_stats - Show bot statistics\n"
+        "/admin_report - Show recent reports\n"
+        "/admin_users - List users\n"
+        "/admin_user USER_ID - Inspect a specific user\n"
+        "/ban USER_ID [reason] - Ban a user\n"
+        "/unban USER_ID - Unban a user"
+    )
+
+
+async def admin_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in settings.ADMIN_IDS:
+        await update.message.reply_text("You do not have admin access.")
+        return
+    users = db.get_all_users()
+    if not users:
+        await update.message.reply_text("No users found.")
+        return
+    lines = ["Users:"]
+    for user in users[:20]:
+        status = "banned" if user["banned"] == 1 else "active" if user["active"] == 1 else "inactive"
+        nickname = user["nickname"] or "No nickname"
+        lines.append(
+            f"{user['telegram_user_id']} | {nickname} | {user['gender'] or 'Unknown'} | {user['city'] or 'Unknown'} | {status}"
+        )
+    await update.message.reply_text("\n".join(lines))
+
+
+async def admin_user_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in settings.ADMIN_IDS:
+        await update.message.reply_text("You do not have admin access.")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /admin_user USER_ID")
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("USER_ID must be a number.")
+        return
+    user = db.get_by_telegram_id(target_id)
+    if not user:
+        await update.message.reply_text(f"No user found with telegram ID {target_id}.")
+        return
+    profile = user_profile_dict(user)
+    status = "banned" if user["banned"] == 1 else "active" if user["active"] == 1 else "inactive"
+    details = (
+        f"Telegram ID: {user['telegram_user_id']}\n"
+        f"Nickname: {profile.get('nickname') or 'N/A'}\n"
+        f"Gender: {profile.get('gender') or 'N/A'}\n"
+        f"City: {profile.get('city') or 'N/A'}\n"
+        f"Age: {profile.get('age') or 'N/A'}\n"
+        f"Mode: {profile.get('mode') or 'N/A'}\n"
+        f"Status: {status}\n"
+        f"Partner ID: {user['partner_id'] if user['partner_id'] is not None else 'None'}\n"
+        f"Created: {user['created_at'] or 'N/A'}\n"
+        f"Updated: {user['updated_at'] or 'N/A'}"
+    )
+    await update.message.reply_text(details)
+
+
+def build_users_export(users: list[dict], file_format: str) -> bytes:
+    normalized = (file_format or "json").strip().lower()
+    if normalized in {"excel", "csv"}:
+        fieldnames = [
+            "telegram_user_id",
+            "nickname",
+            "date_of_birth",
+            "gender",
+            "city",
+            "profile_photo_file_id",
+            "min_age",
+            "max_age",
+            "preferred_gender",
+            "preferred_location",
+            "mode",
+            "active",
+            "partner_id",
+            "banned",
+            "created_at",
+            "updated_at",
+            "age_verified_at",
+        ]
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        for user in users:
+            row = {key: user.get(key, "") for key in fieldnames}
+            writer.writerow(row)
+        return buffer.getvalue().encode("utf-8")
+    payload = json.dumps(users, indent=2, ensure_ascii=False, default=str)
+    return payload.encode("utf-8")
+
+
+async def admin_export_users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in settings.ADMIN_IDS:
+        await update.message.reply_text("You do not have admin access.")
+        return
+    file_format = (context.args[0].lower() if context.args else "json")
+    if file_format not in {"json", "csv", "excel"}:
+        await update.message.reply_text("Usage: /admin_export_users [json|csv|excel]")
+        return
+    users = db.get_all_users()
+    export_bytes = build_users_export([dict(user) for user in users], file_format)
+    extension = "json" if file_format == "json" else "csv"
+    filename = f"users_export.{extension}"
+    await context.bot.send_document(
+        chat_id=update.effective_chat.id,
+        document=InputFile(io.BytesIO(export_bytes), filename=filename),
+        caption=f"Users export as {file_format.upper()}"
+    )
 
 
 async def safety_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -544,8 +667,12 @@ def create_handlers(application):
     application.add_handler(CommandHandler("safety", safety_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("delete", delete_profile))
+    application.add_handler(CommandHandler("admin_help", admin_help_command))
     application.add_handler(CommandHandler("admin_stats", admin_stats_command))
     application.add_handler(CommandHandler("admin_report", admin_report_command))
+    application.add_handler(CommandHandler("admin_users", admin_users_command))
+    application.add_handler(CommandHandler("admin_user", admin_user_command))
+    application.add_handler(CommandHandler("admin_export_users", admin_export_users_command))
     application.add_handler(CommandHandler("ban", ban_command))
     application.add_handler(CommandHandler("unban", unban_command))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, relay_message))

@@ -97,6 +97,33 @@ def test_main_entrypoint_is_sync():
     assert inspect.iscoroutinefunction(bot.main) is False
 
 
+def test_admin_commands_exist():
+    assert callable(bot.admin_help_command)
+    assert callable(bot.admin_users_command)
+    assert callable(bot.admin_user_command)
+    assert callable(bot.admin_export_users_command)
+
+
+def test_user_export_builds_json_and_csv():
+    users = [{
+        "telegram_user_id": 123,
+        "nickname": "Alice",
+        "gender": "female",
+        "city": "Chennai",
+        "banned": 0,
+        "active": 1,
+        "partner_id": None,
+        "created_at": "2024-01-01T00:00:00+00:00",
+        "updated_at": "2024-01-02T00:00:00+00:00",
+    }]
+    json_payload = bot.build_users_export(users, "json")
+    csv_payload = bot.build_users_export(users, "csv")
+    assert b"telegram_user_id" in json_payload
+    assert b"Alice" in json_payload
+    assert b"telegram_user_id" in csv_payload
+    assert b"Alice" in csv_payload
+
+
 def test_skip_photo_command_advances_profile_flow():
     async def run_test():
         update = SimpleNamespace(
